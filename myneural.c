@@ -8,29 +8,129 @@
 #include <curses.h>
 #include "myneural.h"
 #include "caracteres_ansi.h"
+#include "pypeplot.h"
 
-double ReLUSoftplus(double x)
+double ReLUSoftplus(double x, tps_fparams s)
 {
    return log(1.0+exp(x));   
 }
-double dReLUSoftplus(double x)
+double dReLUSoftplus(double x, tps_fparams s)
 {
     return (1.0/(1.0+exp(-x)));
 }
-double dtanh(double x)
+double ftanh(double x, tps_fparams s)
+{
+   return tanh(x);
+}
+double dtanh(double x, tps_fparams s)
 {
    return (1-tanh(x)*tanh(x));
 }
-double logistic(double x)
+double logistic(double x, tps_fparams s)
 {
     return (1.0/(1.0+exp(-x)));
 }
-double dlogistic(double x)
+double dlogistic(double x, tps_fparams s)
 {
     double y; 
-    y = logistic(x);
+    y = logistic(x, s);
     return y*(1-y);
 }
+
+double ChebyShevFunc(double xv, tps_fparams s)
+{
+    double x, xd, x0, x1, xt, xs;
+    unsigned int k; 
+    
+    /*
+     *  @f(@g(v))/@v = @f/@g * @g/@v
+     * 
+     * Hay que buscar una función mejor cuya derivada no se haga cero en v = 0
+     * Parece que si partimos de funciones racionales, todas pasan por ser atan al integrar
+     */
+    if((s->ControlFlags & CTRLF_SQUASHED) != 0)
+    {
+        x = (xv>0.0) ? (xv*xv)/(1+xv*xv) : (-xv*xv)/(1+xv*xv);     
+        xd = (xv>0.0) ? 2*xv/((1+xv*xv)*(1+xv*xv)): -2*xv/((1+xv*xv)*(1+xv*xv));
+    } else
+    {
+        x = xv; xd = 1.0; 
+    }
+    
+    
+    x0 = 1.0;
+    x1 = x;
+    
+    xs = s->p[0];
+    xs += x*s->p[1];
+    
+    s->d[0] = 0;
+    s->d[1] = 1.0;
+    
+    s->T[0] = 1.0;
+    s->T[1] = x;
+    
+    for(k = 2; k<s->N; k++)
+    {
+        xt = 2*x*x1 - x0; 
+        x0 = x1; 
+        x1 = xt;                
+        xs += x1*s->p[k]; // ya está aqui toda la suma                 
+        s->T[k] = x1;
+        s->d[k] = 2*(x0+x* s->d[k-1])- s->d[k-2];
+    }
+    for(k = 0; k<s->N; k++)
+    {
+        s->d[k] *= xd;
+    }
+   // printf("\n-val: %f",x); while(!kbhit()) ; 
+    return xs;
+}
+
+
+double dChebyShevFunc(double x, tps_fparams s)
+{
+    unsigned int k; 
+    x = 0.0; //machacamos la copia de X, no nos interesa
+    
+    for(k = 1; k < s->N; k++)
+    {
+        x+= s->p[k]*s->d[k];
+    }
+    
+    return x;
+}
+
+void dChebyShevPars(double delta, tps_fparams  s)
+{
+    unsigned int k; 
+    double norm; 
+            
+    if((s->ControlFlags & CTRLF_NORMPARAMS) != 0) // Normalización
+    {
+        norm = 1.0; 
+        
+        for(k = 0; k<s->N; k++)
+        {
+            norm += s->p[k]*s->p[k]; // no tocar signo
+        }
+        
+        for(k = 0; k<s->N; k++)
+        {
+            s->p[k] +=  s->T[k]*s->lrate*delta/(norm*pow(2.0,s->N));
+        }        
+        
+    } else 
+    {
+    
+        for(k = 0; k<s->N; k++)
+        {
+            s->p[k] +=  s->T[k]*s->lrate*delta/pow(2.0,s->N);
+        }
+    }
+    
+}
+
 
 
 void CreateDefaulNeural(tps_red rnn, 
@@ -49,7 +149,7 @@ void CreateDefaulNeural(tps_red rnn,
         exit(0);
     }
     rnn->ncapas = NHlayers+2;
-    rnn->lrate = 1.0;
+    rnn->lrate = 0.5;
     
     rnn->l[0].n = (tps_neurona)malloc(sizeof(ts_neurona)*NNIlayer);
     rnn->l[0].nneuronas = NNIlayer;
@@ -62,8 +162,34 @@ void CreateDefaulNeural(tps_red rnn,
         rnn->l[0].n[i].ninputs = Ninputs;
         rnn->l[0].n[i].w = (double *)malloc(sizeof(double)*Ninputs);
         rnn->l[0].n[i].x = (double **)malloc(sizeof(double*)*Ninputs);
-        rnn->l[0].n[i].act_function = tanh;
-        rnn->l[0].n[i].der_act_func = dtanh;
+        rnn->l[0].n[i].ControlFlags = CTRLF_NORMALIZE*0;
+
+        rnn->l[0].n[i].act_function = ChebyShevFunc;
+        rnn->l[0].n[i].der_act_func = dChebyShevFunc;
+        rnn->l[0].n[i].der_par_func = dChebyShevPars;
+        
+        if(rnn->l[0].n[i].der_par_func != NULL)
+        {
+            rnn->l[0].n[i].fpars.T = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+            rnn->l[0].n[i].fpars.p = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+            rnn->l[0].n[i].fpars.d = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+            rnn->l[0].n[i].fpars.N = CHEBY_ORDER;
+            rnn->l[0].n[i].fpars.lrate  = rnn->lrate;
+            rnn->l[0].n[i].fpars.ControlFlags  = CTRLF_SQUASHED;
+            rnn->l[0].n[i].fpars.ControlFlags |= CTRLF_NORMPARAMS*0;
+        
+            for(k = 0; k < rnn->l[0].n[i].fpars.N; k++)
+            {
+                rnn->l[0].n[i].fpars.p[k] = ((double)rand()/RAND_MAX-0.5)*2.0/10.0;
+                rnn->l[0].n[i].fpars.T[k] = 0.0; 
+                rnn->l[0].n[i].fpars.d[k] = 0.0; 
+            }        
+        } else 
+        {
+            rnn->l[0].n[i].fpars.N = 0;
+        }
+        
+        
         rnn->l[0].n[i].b = 0.0;
         rnn->l[0].n[i].o = 0.0;
         rnn->l[0].n[i].v = 0.0;
@@ -87,13 +213,45 @@ void CreateDefaulNeural(tps_red rnn,
         {
             rnn->l[j].n[i].ninputs = rnn->l[j-1].nneuronas;
             
-            rnn->l[j].n[i].act_function = tanh;
-            rnn->l[j].n[i].der_act_func = dtanh;
+            /*rnn->l[j].n[i].act_function = ChebyShevFunc;
+            rnn->l[j].n[i].der_act_func = dChebyShevFunc;
+            rnn->l[j].n[i].der_par_func = dChebyShevPars;*/
+            
+            
+            rnn->l[j].n[i].act_function = ReLUSoftplus;
+            rnn->l[j].n[i].der_act_func = dReLUSoftplus;
+            rnn->l[j].n[i].der_par_func = NULL;            
+            
             rnn->l[j].n[i].b = 0.0;
             rnn->l[j].n[i].o = 0.0;
             rnn->l[j].n[i].v = 0.0;
             rnn->l[j].n[i].w = (double *)malloc(sizeof(double)*rnn->l[j-1].nneuronas);            
             rnn->l[j].n[i].x = (double **)malloc(sizeof(double*)*rnn->l[j-1].nneuronas);
+            rnn->l[j].n[i].ControlFlags = CTRLF_NORMALIZE*0;
+            
+            if(rnn->l[j].n[i].der_par_func != NULL)
+            {
+                rnn->l[j].n[i].fpars.T = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+                rnn->l[j].n[i].fpars.p = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+                rnn->l[j].n[i].fpars.d = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+                rnn->l[j].n[i].fpars.N = CHEBY_ORDER;
+                rnn->l[j].n[i].fpars.lrate  = rnn->lrate;
+                rnn->l[j].n[i].fpars.ControlFlags  = CTRLF_SQUASHED;
+                rnn->l[j].n[i].fpars.ControlFlags |= CTRLF_NORMPARAMS*0;
+
+                for(k = 0; k < rnn->l[j].n[i].fpars.N; k++)
+                {
+                    rnn->l[j].n[i].fpars.p[k] = ((double)rand()/RAND_MAX-0.5)*2.0/10.0;
+                    rnn->l[j].n[i].fpars.T[k] = 0.0; 
+                    rnn->l[j].n[i].fpars.d[k] = 0.0; 
+                }
+                
+            } else 
+            {
+                rnn->l[j].n[i].fpars.N = 0;
+            }
+
+                
             
             //conectar las entradas con las salidas de las neuronas anteriores
             // e inicializar pesos 
@@ -111,10 +269,37 @@ void CreateDefaulNeural(tps_red rnn,
    for(i = 0; i < Noutputs; i++)
    {
        rnn->l[NHlayers+1].n[i].ninputs = rnn->l[NHlayers].nneuronas;       
-       rnn->l[NHlayers+1].n[i].act_function = tanh;
-       rnn->l[NHlayers+1].n[i].der_act_func = dtanh;
+       rnn->l[NHlayers+1].n[i].act_function = ChebyShevFunc;
+       rnn->l[NHlayers+1].n[i].der_act_func = dChebyShevFunc;
+       rnn->l[NHlayers+1].n[i].der_par_func = dChebyShevPars;
+       
        rnn->l[NHlayers+1].n[i].w = (double *)malloc(sizeof(double)*rnn->l[NHlayers].nneuronas);            
        rnn->l[NHlayers+1].n[i].x = (double **)malloc(sizeof(double*)*rnn->l[NHlayers].nneuronas);       
+       rnn->l[NHlayers+1].n[i].ControlFlags = CTRLF_NORMALIZE*0;
+       
+        if(rnn->l[NHlayers+1].n[i].der_par_func != NULL)
+        {
+            rnn->l[NHlayers+1].n[i].fpars.T = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+            rnn->l[NHlayers+1].n[i].fpars.p = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+            rnn->l[NHlayers+1].n[i].fpars.d = (double *)malloc(sizeof(double)*CHEBY_ORDER);
+            rnn->l[NHlayers+1].n[i].fpars.N = CHEBY_ORDER;
+            rnn->l[NHlayers+1].n[i].fpars.lrate  = rnn->lrate;
+            rnn->l[NHlayers+1].n[i].fpars.ControlFlags  = CTRLF_SQUASHED;
+            rnn->l[NHlayers+1].n[i].fpars.ControlFlags |= CTRLF_NORMPARAMS*0;
+        
+        
+            for(k = 0; k < rnn->l[j].n[i].fpars.N; k++)
+            {
+                rnn->l[NHlayers+1].n[i].fpars.p[k] = ((double)rand()/RAND_MAX-0.5)*2.0/10.0;
+                rnn->l[NHlayers+1].n[i].fpars.T[k] = 0.0; 
+                rnn->l[NHlayers+1].n[i].fpars.d[k] = 0.0; 
+            }
+        } else 
+        {
+            rnn->l[NHlayers+1].n[i].fpars.N = 0;
+        }
+       
+       
        rnn->l[NHlayers+1].n[i].b = 0;
        rnn->l[NHlayers+1].n[i].o = 0;
        rnn->l[NHlayers+1].n[i].v = 0;
@@ -141,7 +326,7 @@ void EvaluateNeural(tps_red rnn)
                     rnn->l[i].n[j].v  += rnn->l[i].n[j].w[k]*((double)*(rnn->l[i].n[j].x[k]));                
             }
             rnn->l[i].n[j].v += rnn->l[i].n[j].b;
-            rnn->l[i].n[j].o = rnn->l[i].n[j].act_function(rnn->l[i].n[j].v);                 
+            rnn->l[i].n[j].o = rnn->l[i].n[j].act_function(rnn->l[i].n[j].v, &rnn->l[i].n[j].fpars);                 
         }
     }
 }
@@ -151,10 +336,74 @@ void BackPropagIteration(tps_red rnn, double *d, double *errsq)
 {
     double err, dw,scale;
     t_neuronum i,j,k;
+    unsigned int  prep;
+    
+    static unsigned long int counter = 0;
     
     //primera fase;
     EvaluateNeural(rnn);
     // primero evaluar la capa de salida
+    
+    
+
+for(prep = 0; prep < 4; prep++)
+{
+    err = 0.0;
+    if(errsq != NULL)
+        *errsq = 0;    
+    // calculo de las deltas, capa de salida
+    for(j = 0; j < rnn->l[rnn->ncapas-1].nneuronas; j++)
+    {
+        err = d[j]-rnn->l[rnn->ncapas-1].n[j].o;
+        
+        if(errsq != NULL)
+            *errsq += err*err;
+        rnn->l[rnn->ncapas-1].n[j].delta = err;
+    
+        
+        rnn->l[rnn->ncapas-1].n[j].delta *= 
+        rnn->l[rnn->ncapas-1].n[j].der_act_func(rnn->l[rnn->ncapas-1].n[j].v, &rnn->l[rnn->ncapas-1].n[j].fpars);
+        
+    }
+
+    // calculo de las deltas, capas intermedias   
+    for(i = rnn->ncapas-1; i>0; i--) // direccionar con [i-1] unsigned long int. Macarra
+    {
+        for(j = 0; j < rnn->l[i-1].nneuronas; j++)
+        {
+           
+            rnn->l[i-1].n[j].delta = 0.0;
+            // neuronas de la capa posterior
+            for(k = 0; k < rnn->l[i].nneuronas; k++) 
+            {
+                rnn->l[i-1].n[j].delta += rnn->l[i].n[k].delta * rnn->l[i].n[k].w[j]; // peso j a neurona j
+            }                
+                        
+            rnn->l[i-1].n[j].delta *= rnn->l[i-1].n[j].der_act_func(rnn->l[i-1].n[j].v, &rnn->l[i-1].n[j].fpars); 
+        }
+        
+    }
+
+    // ahora es cuando se actualizan los putos pesos, joder 
+    
+//*******************************************************
+    // primero los coefs
+  for(i = 0; i < rnn->ncapas; i++)
+  {
+      for(j = 0; j < rnn->l[i].nneuronas; j++)
+      {
+
+        if(rnn->l[i].n[j].der_par_func != NULL)       
+        {
+            if(i != (rnn->ncapas-1))
+                rnn->l[i].n[j].der_par_func(rnn->l[i].n[j].delta,&rnn->l[i].n[j].fpars);
+            else 
+                rnn->l[i].n[j].der_par_func(d[j]-rnn->l[rnn->ncapas-1].n[j].o,&rnn->l[i].n[j].fpars);                
+        }
+      }
+  }
+//*******************************************************
+} // fin prep
 
     err = 0.0;
     if(errsq != NULL)
@@ -169,7 +418,7 @@ void BackPropagIteration(tps_red rnn, double *d, double *errsq)
         rnn->l[rnn->ncapas-1].n[j].delta = err;
         
         rnn->l[rnn->ncapas-1].n[j].delta *= 
-        rnn->l[rnn->ncapas-1].n[j].der_act_func(rnn->l[rnn->ncapas-1].n[j].v);
+        rnn->l[rnn->ncapas-1].n[j].der_act_func(rnn->l[rnn->ncapas-1].n[j].v, &rnn->l[rnn->ncapas-1].n[j].fpars);
                 
     }
     // calculo de las deltas, capas intrmedias   
@@ -185,19 +434,24 @@ void BackPropagIteration(tps_red rnn, double *d, double *errsq)
                 rnn->l[i-1].n[j].delta += rnn->l[i].n[k].delta * rnn->l[i].n[k].w[j]; // peso j a neurona j
             }                
                         
-            rnn->l[i-1].n[j].delta *= rnn->l[i-1].n[j].der_act_func(rnn->l[i-1].n[j].v); 
+            rnn->l[i-1].n[j].delta *= rnn->l[i-1].n[j].der_act_func(rnn->l[i-1].n[j].v, &rnn->l[i-1].n[j].fpars); 
         }
         
     }
 
-    // ahora es cuando se actualizan los putos pesos, joder 
-    
+
+//********************************************************
+
     for(j = 0; j < rnn->l[rnn->ncapas-1].nneuronas; j++)
     {
         scale = 0.0;
-        for(k = 0; k < rnn->l[rnn->ncapas-1].n[j].ninputs; k++)
-            scale += abs((double)*(rnn->l[rnn->ncapas-1].n[j].x[k]));
-        scale *= scale;
+        //NHlayers+1
+        if((rnn->l[rnn->ncapas-1].n[j].ControlFlags & CTRLF_NORMALIZE) != 0)
+        {
+            for(k = 0; k < rnn->l[rnn->ncapas-1].n[j].ninputs; k++)
+                scale += abs((double)*(rnn->l[rnn->ncapas-1].n[j].x[k]));
+            scale *= scale;
+        }
         scale += 1.0;                
 
         for(k = 0; k < rnn->l[rnn->ncapas-1].n[j].ninputs; k++)
@@ -205,10 +459,12 @@ void BackPropagIteration(tps_red rnn, double *d, double *errsq)
             dw = (rnn->lrate)*rnn->l[rnn->ncapas-1].n[j].delta*
                  ((double)*(rnn->l[rnn->ncapas-1].n[j].x[k]));            
             rnn->l[rnn->ncapas-1].n[j].w[k] += dw/scale;
+            // llamar aqui a rnn->l[i-1].n[j].fpars update
         }
        
         dw = (rnn->lrate)*rnn->l[rnn->ncapas-1].n[j].delta;  
-        rnn->l[rnn->ncapas-1].n[j].b += dw/scale;        
+        rnn->l[rnn->ncapas-1].n[j].b += dw/scale;      
+        
     }    
     
     for(i = rnn->ncapas-1; i>0; i--) // direccionar con [i-1] unsigned long int. Macarra
@@ -216,9 +472,13 @@ void BackPropagIteration(tps_red rnn, double *d, double *errsq)
         for(j = 0; j < rnn->l[i-1].nneuronas; j++)
         {
             scale = 0.0;
-            for(k = 0; k < rnn->l[i-1].n[j].ninputs; k++)
-                scale += abs((double)*(rnn->l[i-1].n[j].x[k]));
-            scale *= scale;
+            if((rnn->l[i-1].n[j].ControlFlags & CTRLF_NORMALIZE) != 0)
+            {
+                for(k = 0; k < rnn->l[i-1].n[j].ninputs; k++)
+                    scale += abs((double)*(rnn->l[i-1].n[j].x[k]));
+                scale *= scale;
+            }
+            
             scale += 1.0;
 
             //para todas las entradas de esa puta neurona 
@@ -228,10 +488,15 @@ void BackPropagIteration(tps_red rnn, double *d, double *errsq)
                      ((double)*(rnn->l[i-1].n[j].x[k]))/scale;
                 rnn->l[i-1].n[j].w[k] += dw;
             }
-            rnn->l[i-1].n[j].b += (rnn->lrate)* rnn->l[i-1].n[j].delta/scale;            
+            // llamar aqui a rnn->l[i-1].n[j].fpars update
+            rnn->l[i-1].n[j].b += (rnn->lrate)* rnn->l[i-1].n[j].delta/scale; 
+                        
         }
     }
     
+    //         if(rnn->l[rnn->ncapas-1].n[j].der_par_func != NULL)
+//            rnn->l[rnn->ncapas-1].n[j].der_par_func(rnn->l[rnn->ncapas-1].n[j].delta,&rnn->l[rnn->ncapas-1].n[j].fpars);
+        
 }
 
 void ShowNeuralInfo(tps_red rnn)
@@ -357,7 +622,7 @@ void DumpNeuralGraph(tps_red rnn, unsigned int NGraphs, FILE *f)
     fprintf(f,"}\n");    
 }
 
-DumpNeuralNet(tps_red rnn)
+void DumpNeuralNet(tps_red rnn)
 {
     t_neuronum i,j,k;
     FILE *f;    
@@ -383,7 +648,7 @@ DumpNeuralNet(tps_red rnn)
 int main(void)
 {
 #define ORDEN 3
-#define NETS 3
+#define NETS 1
     double random_value;
     unsigned long int k,j,r,kk, epoch_counter;
     double input[ORDEN];
@@ -391,6 +656,9 @@ int main(void)
     //double itestv[4][2] = {{0.0,0.0},{0.0,1.0},{1.0,0.0},{1.0,1.0}};
     double otestv[NETS];// deberia ser doble, nets y nsalidas
     FILE *f,*fres, *neural_graph, *pipe[NETS]; 
+    
+    unsigned int lay, neur;
+    
     // ficheros 
     neural_graph    = fopen("neur.dot","w"); // grafico de la red
     f               = fopen("neur.txt","w"); // pesos y estructura
@@ -405,8 +673,8 @@ int main(void)
                             ORDEN, // numero de entradas
                             1, // numero de salidas (igual a neuronas en salida)
                             3, // numero de neuronas en la entrada
-                            1, // numero de capas ocultas
-                            11); // numero de neuronas en las capas ocultas    
+                            3, // numero de capas ocultas
+                            25); // numero de neuronas en las capas ocultas    
         else 
         CreateDefaulNeural(&neural[k], 
                             ORDEN+1, // numero de entradas
@@ -432,7 +700,7 @@ int main(void)
     }
     
     
-    j = 1;
+    j = 0;
     
     for(k = 0; k < NETS; k++)
     {
@@ -441,7 +709,7 @@ int main(void)
         err[k]  = 0.0;
     }
     clrscr();
-    neural[0].lrate = 0.5;
+    //neural.lrate = 0.5;
     DumpNeuralGraph(&neural[0],NETS, neural_graph);    
     fclose(neural_graph);
     system("dot neur.dot -Tps -o neur.ps");
@@ -459,13 +727,13 @@ epoch_counter = 0;
         for(kk = 1; kk < ORDEN; kk++)
             input[kk] = input[kk-1]*input[0];
 
-        otestv[0] = (1+cos(2*M_PI*phi))/2;//+ 0.01*((rand()/((double)RAND_MAX))-0.5)*2; 
+        otestv[0] = (1+cos(2*M_PI*pow(phi,3.0)+pow(phi,2.0)/7))/2;//+ 0.01*((rand()/((double)RAND_MAX))-0.5)*2; 
         
         errt = otestv[0];
         
         for(kk = 0; kk < NETS; kk++)
         {
-            for(r = 0; r < 8; r++)
+            for(r = 0; r < 1; r++)
             {
                 EvaluateNeural(&neural[kk]);
                 
@@ -500,8 +768,9 @@ epoch_counter = 0;
          {
              k++;
              printf("      f: %.15le\n",kk,otestv[0]);
-             for(kk = 0; kk < NETS; kk++)
-                printf(" Out[%d]: %.15le\n",kk,neural[kk].l[neural[kk].ncapas-1].n[0].o);
+             //for(kk = 0; kk < NETS; kk++)
+               // printf("Salida de la red[%d]: %.15le\n",kk,neural[kk].l[neural[kk].ncapas-1].n[0].o);
+#if 0             
              {
                  double p;
                  p = 0.0;
@@ -514,13 +783,46 @@ epoch_counter = 0;
                 printf("SumOuts: %.15le\n",p);
                 printf("DifErrs: %.15le\n",p-otestv[0]);
              }
+#endif              
              for(kk = 0; kk < NETS; kk++)                         
                 printf("Errp[%d]: %.15le\n",kk, errp[kk]);             
              printf("Error t: %.15le\n",errt);
              for(kk = 0; kk < NETS; kk++)
                 printf("Errm[%d]: %.15le  \t epoch %d\n",kk, sqrt(errm[kk]/500), epoch_counter);
              
+             //unsigned int lay, neur;
+             if(epoch_counter < 1)
+                 clrscr();
+             
+             gotoxy(1,1); //while(!kbhit());
+#if 0             
+             for(lay = 0; lay < neural[0].ncapas; lay++)
+             {
+                //      printf("capa %d -> N Neuronas %d \n", lay, neural[0].l[lay].nneuronas);
+                //while(!kbhit());                 
+                for(neur = 0; neur < neural[0].l[lay].nneuronas; neur++)
+                {
+                    /*for(int iin = 0; iin < neural[0].l[lay].n[neur].ninputs; iin++)
+                        printf("X: %le, ",*(neural[0].l[lay].n[neur].x[iin]));
+                    printf("\n");*/
+                    
+                    for(int iin = 0; iin < neural[0].l[lay].n[neur].ninputs; iin++)
+                        printf("W %le, ",neural[0].l[lay].n[neur].w[iin]);            
+                    
+                    if(neural[0].l[lay].n[neur].fpars.N > 0)
+                    {
+                        printf("\n a:");
+                    
+                        for(int iin = 0; iin < neural[0].l[lay].n[neur].fpars.N; iin++)
+                            printf("%le, ",neural[0].l[lay].n[neur].fpars.p[iin]);
+                    }
+                        
+                    printf("N(%d,%d) -> %le \n",lay,neur, neural[0].l[lay].n[neur].o);
+                }
+             }            
+             
              printf("\n");
+#endif              
              
              if(k >= 100)
              {                

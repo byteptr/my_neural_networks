@@ -4,12 +4,26 @@
 #include <math.h>
 #include "kbhit.h"
 
+#define CHEBY_ORDER 8
+#define CTRLF_NORMPARAMS    0x01
+#define CTRLF_SQUASHED       0x02
+#define CTRLF_NORMALIZE     0x04
+
 typedef unsigned long int t_neuronum;
-typedef struct 
+
+
+typedef struct
 {
-    double (*act_function)(double); // funcion de activacion
-    double (*der_act_func)(double); // derivada 
-} ts_neurona_func;
+    unsigned long int N;
+    double *T; // cada valor del polinomios de chebyshev 
+    double *d; // cada valor de cada derivada 
+    double *p; // cada parámetro
+    double lrate;
+    unsigned char ControlFlags;
+    
+} ts_fparams;
+
+typedef ts_fparams* tps_fparams;
 
 typedef struct {
         t_neuronum ninputs; // Número de entradas
@@ -18,11 +32,14 @@ typedef struct {
         double **x; // entradas
         double v; 
         double o;   // salida
-        double delta;
-        double (*act_function)(double); // funcion de activacion
-        double (*der_act_func)(double); // derivada 
+        double delta;                
+        ts_fparams fpars;
+        unsigned char ControlFlags;
         
-        //ts_neurona_func v;
+        double (*act_function)(double, tps_fparams); // funcion de activacion
+        double (*der_act_func)(double, tps_fparams); // derivada 
+        void (*der_par_func)(double, tps_fparams); // derivada 
+        
 } ts_neurona;
 
 typedef ts_neurona* tps_neurona;
@@ -44,7 +61,7 @@ typedef struct {
 
 typedef ts_red* tps_red;
 
-double ReLUSoftplus(double);
-double dReLUSoftplus(double);
+double ReLUSoftplus(double, tps_fparams );
+double dReLUSoftplus(double, tps_fparams );
 void ShowNeuralInfo(tps_red rnn);
 #endif 
